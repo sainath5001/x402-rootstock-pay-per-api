@@ -10,6 +10,25 @@ The `PayPerAPI` contract is a smart contract deployed on Rootstock that:
 - Allows API servers to verify payments on-chain
 - Enables the contract owner to withdraw accumulated funds
 
+## 🏗️ Architecture
+
+This contract is part of the x402 payment flow:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Contract
+    participant Server
+
+    Client->>Contract: Send RBTC payment via pay()
+    Contract->>Contract: Record payment in mapping
+    Contract-->>Client: PaymentReceived event
+    
+    Server->>Contract: Check hasPaid(address)?
+    Contract-->>Server: true/false (payment status)
+    Server->>Server: Verify payment & serve API
+```
+
 ## ✨ Contract Features
 
 - **Fixed Price**: Configurable price per API request (set during deployment)
