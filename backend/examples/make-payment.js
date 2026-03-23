@@ -11,12 +11,36 @@
  * WARNING: Never commit your private key to git!
  */
 
-import { createWalletClient, http, parseEther } from 'viem';
+import { createWalletClient, custom, parseEther } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { rootstockTestnet, CONTRACT_ADDRESS, payPerAPIContractABI } from '../config/rootstock.js';
 import dotenv from 'dotenv';
+import fetch from 'node-fetch';
+import https from 'node:https';
 
 dotenv.config();
+const ipv4HttpsAgent = new https.Agent({ family: 4 });
+const rpcUrl = process.env.ROOTSTOCK_TESTNET_RPC_URL || 'https://public-node.testnet.rsk.co';
+
+async function rpcRequest(method, params = []) {
+    const response = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: Date.now(),
+            method,
+            params,
+        }),
+        agent: ipv4HttpsAgent,
+    });
+
+    const json = await response.json();
+    if (json.error) {
+        throw new Error(`RPC error (${json.error.code}): ${json.error.message}`);
+    }
+    return json.result;
+}
 
 // Get private key from environment
 const PRIVATE_KEY = process.env.PRIVATE_KEY || process.env.PAYER_PRIVATE_KEY;
@@ -63,7 +87,11 @@ async function makePayment() {
         const client = createWalletClient({
             account,
             chain: rootstockTestnet,
-            transport: http(process.env.ROOTSTOCK_TESTNET_RPC_URL || 'https://public-node.testnet.rsk.co'),
+            transport: custom({
+                async request({ method, params }) {
+                    return rpcRequest(method, params);
+                },
+            }),
         });
 
         // Payment amount: 0.0001 RBTC

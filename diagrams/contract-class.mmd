@@ -1,0 +1,10 @@
+classDiagram
+    class PayPerAPI {
+        +uint256 pricePerRequest
+        +mapping(address => uint256) paymentBalances
+        +pay() payable
+        +hasPaid(address) bool
+        +getPaymentBalance(address) uint256
+        +getAvailableRequests(address) uint256
+    }
+

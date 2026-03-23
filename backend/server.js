@@ -18,8 +18,8 @@
 
 import express from 'express';
 import dotenv from 'dotenv';
-import { x402PaymentMiddleware } from './middleware/x402Payment.js';
 import { paymentMiddleware } from './middleware/x402PaymentConfig.js';
+import { getAuthInstructions, verifyWalletOwnership } from './middleware/x402Payment.js';
 
 // Load environment variables
 dotenv.config();
@@ -150,12 +150,14 @@ app.get('/api/payment/status', async (req, res) => {
         return res.status(400).json({
             error: 'Missing wallet address',
             message: 'Please include your wallet address in the x-wallet-address header',
+            auth: getAuthInstructions(req),
         });
     }
 
     try {
         const { verifyPayment } = await import('./middleware/x402Payment.js');
         const { formatRBTC } = await import('./config/rootstock.js');
+        await verifyWalletOwnership(req, walletAddress);
         const { hasPaid, balance, availableRequests, pricePerRequest } = await verifyPayment(walletAddress);
 
         res.json({
@@ -168,6 +170,22 @@ app.get('/api/payment/status', async (req, res) => {
             pricePerRequestFormatted: formatRBTC(pricePerRequest),
         });
     } catch (error) {
+        const authError = [
+            'Missing auth signature headers',
+            'Invalid auth timestamp',
+            'Expired auth timestamp',
+            'Invalid auth nonce',
+            'Auth nonce already used',
+            'Invalid wallet signature',
+        ].includes(error.message);
+        if (authError) {
+            return res.status(401).json({
+                error: 'Wallet ownership verification failed',
+                message: error.message,
+                auth: getAuthInstructions(req, walletAddress),
+            });
+        }
+
         res.status(500).json({
             error: 'Failed to check payment status',
             message: error.message,

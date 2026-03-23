@@ -8,8 +8,25 @@
  * making it perfect for Bitcoin-backed API payments via x402.
  */
 
-import { createPublicClient, http, formatEther, parseEther } from 'viem';
+import { createPublicClient, createWalletClient, custom, formatEther, parseEther } from 'viem';
 import { defineChain } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import dns from 'node:dns';
+import fetch from 'node-fetch';
+import https from 'node:https';
+import dotenv from 'dotenv';
+
+// Ensure env vars are available even when this module is imported
+// before server.js calls dotenv.config() (ESM import evaluation order).
+dotenv.config();
+
+// WSL/undici can intermittently fail on dual-stack resolution for some RPC hosts.
+// Force IPv4-first resolution process-wide for predictable RPC connectivity.
+try {
+  dns.setDefaultResultOrder('ipv4first');
+} catch (error) {
+  // Non-fatal: continue with system DNS order if unavailable.
+}
 
 /**
  * Rootstock Testnet Chain Definition
@@ -37,13 +54,43 @@ export const rootstockTestnet = defineChain({
   },
 });
 
+const rpcUrl = process.env.ROOTSTOCK_TESTNET_RPC_URL || 'https://public-node.testnet.rsk.co';
+const ipv4HttpsAgent = new https.Agent({ family: 4 });
+
+async function rpcRequest(method, params = []) {
+  const response = await fetch(rpcUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: Date.now(),
+      method,
+      params,
+    }),
+    agent: ipv4HttpsAgent,
+  });
+
+  const json = await response.json();
+  if (json.error) {
+    throw new Error(`RPC error (${json.error.code}): ${json.error.message}`);
+  }
+
+  return json.result;
+}
+
+const rpcTransport = custom({
+  async request({ method, params }) {
+    return rpcRequest(method, params);
+  },
+});
+
 /**
  * Create a public client for reading from Rootstock testnet
  * This client is used to verify on-chain payments
  */
 export const publicClient = createPublicClient({
   chain: rootstockTestnet,
-  transport: http(process.env.ROOTSTOCK_TESTNET_RPC_URL || 'https://public-node.testnet.rsk.co'),
+  transport: rpcTransport,
 });
 
 /**
@@ -86,12 +133,37 @@ export const payPerAPIContractABI = [
     stateMutability: 'view',
     type: 'function',
   },
+  {
+    inputs: [
+      { internalType: 'address', name: 'payer', type: 'address' },
+      { internalType: 'uint256', name: 'amount', type: 'uint256' },
+    ],
+    name: 'deductPayment',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
 ];
 
 /**
  * Contract address deployed on Rootstock testnet
  */
 export const CONTRACT_ADDRESS = (process.env.CONTRACT_ADDRESS || '0xa1F4D43749ABEdb6a835aF9184CD0A9c194d4C8a').toLowerCase();
+
+const ownerPrivateKeyRaw = process.env.OWNER_PRIVATE_KEY || '';
+const ownerPrivateKey = ownerPrivateKeyRaw
+  ? (ownerPrivateKeyRaw.startsWith('0x') ? ownerPrivateKeyRaw : `0x${ownerPrivateKeyRaw}`)
+  : null;
+
+export const ownerAccount = ownerPrivateKey ? privateKeyToAccount(ownerPrivateKey) : null;
+
+export const walletClient = ownerAccount
+  ? createWalletClient({
+      account: ownerAccount,
+      chain: rootstockTestnet,
+      transport: rpcTransport,
+    })
+  : null;
 
 /**
  * Helper function to format RBTC amounts for display

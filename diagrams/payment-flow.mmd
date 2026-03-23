@@ -1,0 +1,13 @@
+flowchart TD
+    A[Client makes API request] --> B{Server checks<br/>payment status}
+    B -->|Not Paid| C[Return HTTP 402<br/>+ x402 instructions]
+    C --> D[Client pays RBTC<br/>to contract]
+    D --> E[Contract records<br/>payment on-chain]
+    E --> F[Client retries<br/>API request]
+    F --> B
+    B -->|Paid| G[Return HTTP 200<br/>+ API data]
+    
+    style C fill:#ff9999
+    style G fill:#99ff99
+    style E fill:#99ccff
+

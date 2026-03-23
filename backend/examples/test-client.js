@@ -15,12 +15,53 @@
  *   - Wallet address with RBTC balance on Rootstock testnet
  */
 
-// Use native fetch (Node.js 18+) or node-fetch for older versions
-// import fetch from 'node-fetch'; // Uncomment if using Node < 18
+import { privateKeyToAccount } from 'viem/accounts';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const SERVER_URL = process.env.SERVER_URL || 'http://localhost:3000';
-// Replace with your test wallet address
-const WALLET_ADDRESS = process.env.WALLET_ADDRESS || '0xYourWalletAddressHere';
+const SIGNER_PRIVATE_KEY = process.env.SIGNER_PRIVATE_KEY || '';
+
+const signerAccount = SIGNER_PRIVATE_KEY
+  ? privateKeyToAccount(SIGNER_PRIVATE_KEY.startsWith('0x') ? SIGNER_PRIVATE_KEY : `0x${SIGNER_PRIVATE_KEY}`)
+  : null;
+const WALLET_ADDRESS = process.env.WALLET_ADDRESS || signerAccount?.address || '0xYourWalletAddressHere';
+
+if (signerAccount && process.env.WALLET_ADDRESS) {
+  const envWallet = process.env.WALLET_ADDRESS.toLowerCase();
+  const signerWallet = signerAccount.address.toLowerCase();
+  if (envWallet !== signerWallet) {
+    throw new Error(
+      `WALLET_ADDRESS (${process.env.WALLET_ADDRESS}) does not match SIGNER_PRIVATE_KEY address (${signerAccount.address}).`
+    );
+  }
+}
+
+async function buildAuthHeaders(method, path, walletAddress) {
+  if (!signerAccount) {
+    throw new Error('Missing SIGNER_PRIVATE_KEY for request signing');
+  }
+
+  const timestamp = Date.now().toString();
+  const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const message = [
+    'x402-auth',
+    `wallet:${walletAddress.toLowerCase()}`,
+    `method:${method.toUpperCase()}`,
+    `path:${path}`,
+    `timestamp:${timestamp}`,
+    `nonce:${nonce}`,
+  ].join('\n');
+
+  const signature = await signerAccount.signMessage({ message });
+  return {
+    'x-wallet-address': walletAddress,
+    'x-auth-signature': signature,
+    'x-auth-timestamp': timestamp,
+    'x-auth-nonce': nonce,
+  };
+}
 
 /**
  * Step 1: Make initial API request
@@ -32,9 +73,7 @@ async function makeInitialRequest() {
   try {
     const response = await fetch(`${SERVER_URL}/api/data`, {
       method: 'GET',
-      headers: {
-        'x-wallet-address': WALLET_ADDRESS,
-      },
+      headers: await buildAuthHeaders('GET', '/api/data', WALLET_ADDRESS),
     });
 
     const data = await response.json();
@@ -44,10 +83,14 @@ async function makeInitialRequest() {
       console.log('Payment Instructions:');
       console.log(JSON.stringify(data, null, 2));
       return data;
-    } else {
+    } else if (response.status === 200) {
       console.log('✅ Payment already verified!');
       console.log('Response:', JSON.stringify(data, null, 2));
       return null;
+    } else {
+      console.log(`❌ Request returned HTTP ${response.status}`);
+      console.log('Response:', JSON.stringify(data, null, 2));
+      throw new Error(`Unexpected API status: ${response.status}`);
     }
   } catch (error) {
     console.error('❌ Request failed:', error.message);
@@ -98,9 +141,7 @@ async function checkPaymentStatus() {
   try {
     const response = await fetch(`${SERVER_URL}/api/payment/status`, {
       method: 'GET',
-      headers: {
-        'x-wallet-address': WALLET_ADDRESS,
-      },
+      headers: await buildAuthHeaders('GET', '/api/payment/status', WALLET_ADDRESS),
     });
 
     const data = await response.json();
@@ -123,9 +164,7 @@ async function retryRequest() {
   try {
     const response = await fetch(`${SERVER_URL}/api/data`, {
       method: 'GET',
-      headers: {
-        'x-wallet-address': WALLET_ADDRESS,
-      },
+      headers: await buildAuthHeaders('GET', '/api/data', WALLET_ADDRESS),
     });
 
     const data = await response.json();
