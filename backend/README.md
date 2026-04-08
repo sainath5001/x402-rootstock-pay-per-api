@@ -1,24 +1,27 @@
 # x402 Pay-Per-API Backend
 
-A Node.js REST API server that implements the **x402 payment standard** for pay-per-request API access using **Rootstock (RBTC)**. This enables Bitcoin-secured, permissionless API monetization.
+Node.js API that returns **HTTP 402** with **x402-style payment JSON** when prepaid RBTC balance is too low, verifies **EIP-191 signed headers** so `x-wallet-address` cannot be spoofed, and calls **`deductPayment` on-chain before** serving protected routes (true pay-per-request for this prepaid pattern).
+
+**Positioning:** HTTP 402 + metadata follows x402 *style*; signature headers are a **custom extension** (not in the core x402 spec). Say “x402-inspired” unless you match the full spec.
 
 ## 📋 Overview
 
 This backend server:
-- Returns HTTP 402 Payment Required when clients haven't paid
-- Verifies on-chain payments using Rootstock smart contracts
-- Serves API responses after payment verification
-- Implements x402-compatible payment instructions
+- Requires signed auth headers on paid routes and `/api/payment/status`
+- Verifies prepaid balance on the PayPerAPI contract
+- Returns HTTP 402 with payment instructions when balance is insufficient
+- Submits `deductPayment` and waits for receipt before calling route handlers
+- Fails fast at startup if `OWNER_PRIVATE_KEY` is missing (deduction cannot be bypassed by misconfiguration)
 
 ## 🏗️ Architecture
 
 **Payment Flow:**
-1. Client makes API request with wallet address
-2. Server checks payment status on Rootstock contract
-3. If not paid: Returns HTTP 402 with payment instructions
-4. Client pays RBTC to contract
-5. Client retries request
-6. Server verifies payment and serves API response
+1. Client sends `x-wallet-address` plus `x-auth-signature`, `x-auth-timestamp`, `x-auth-nonce`
+2. Server verifies signature (EIP-191) and rejects replays (nonce)
+3. Server reads on-chain balance; if too low → HTTP 402
+4. Client tops up via `pay()` on the contract if needed
+5. Client retries with a **fresh** nonce/signature
+6. Server runs `deductPayment`, confirms tx + balance drop, then serves the response
 
 ## 🚀 Quick Start
 
@@ -52,13 +55,18 @@ ROOTSTOCK_TESTNET_RPC_URL=https://public-node.testnet.rsk.co
 CONTRACT_ADDRESS=0xYourDeployedContractAddress
 CHAIN_ID=31
 PORT=3000
+
+# Required: contract owner key — used to call deductPayment every paid request
+OWNER_PRIVATE_KEY=0xYourContractOwnerPrivateKey
+
+# For examples/test-client.js and examples/demonstrate-auth.js
+SIGNER_PRIVATE_KEY=0xYourClientPrivateKey
+WALLET_ADDRESS=0xYourClientAddress
 ```
 
 **Important:** Replace `0xYourDeployedContractAddress` with your actual deployed contract address from the contracts deployment.
 
-3. **Optional - For making payments:**
-
-If you want to use the payment script, add:
+3. **For paying into the contract (`examples/make-payment.js`):**
 
 ```env
 PAYER_PRIVATE_KEY=0xYourPrivateKey
@@ -84,14 +92,23 @@ You should see:
 curl http://localhost:3000/health
 ```
 
-**Protected endpoint (requires payment):**
+**Signing spec (no payment):**
 
 ```bash
-curl -H "x-wallet-address: 0xYourWalletAddress" \
-  http://localhost:3000/api/data
+curl -s http://localhost:3000/api/auth/spec
 ```
 
-If not paid, you'll receive HTTP 402 with payment instructions.
+**Protected endpoint (use example client — signatures required):**
+
+```bash
+npm run test-client
+```
+
+**Show a signed message locally (reviewers):**
+
+```bash
+npm run demonstrate-auth
+```
 
 ## 📝 API Endpoints
 
@@ -100,10 +117,15 @@ If not paid, you'll receive HTTP 402 with payment instructions.
 - **Payment Required:** No
 - Returns server status and contract information
 
+### Wallet auth spec
+- **GET** `/api/auth/spec?wallet=0x...`
+- **Payment Required:** No
+- JSON description of headers and EIP-191 message format
+
 ### Protected Data API
 - **GET** `/api/data`
-- **Payment Required:** Yes
-- Returns protected data after payment verification
+- **Payment Required:** Yes (signature + prepaid deduct)
+- Returns protected data only after successful on-chain deduction
 
 ### Weather API
 - **GET** `/api/weather`
@@ -117,18 +139,17 @@ If not paid, you'll receive HTTP 402 with payment instructions.
 
 ### Payment Status
 - **GET** `/api/payment/status`
-- **Payment Required:** No
-- Check payment status for a wallet address
+- **Payment Required:** No RBTC charge, but **same signature headers as paid routes**
+- Read-only balance check for the wallet in `x-wallet-address`
 
 ## 🔄 Complete Payment Flow
 
 ### Step 1: Make Initial Request
 
-Client makes API request with wallet address in header:
+Use signed headers (see `GET /api/auth/spec` or `npm run demonstrate-auth`). Example:
 
 ```bash
-curl -H "x-wallet-address: 0xYourAddress" \
-  http://localhost:3000/api/data
+npm run test-client
 ```
 
 ### Step 2: Receive HTTP 402 Response
@@ -168,14 +189,13 @@ Wait for transaction to be confirmed on Rootstock network (usually 1-2 blocks).
 
 ### Step 5: Retry Request
 
-After payment is confirmed, retry the same API request:
+After payment is confirmed, retry with a **new** nonce/signature (the example client does this automatically):
 
 ```bash
-curl -H "x-wallet-address: 0xYourAddress" \
-  http://localhost:3000/api/data
+npm run test-client
 ```
 
-You should now receive HTTP 200 with the API data instead of HTTP 402.
+You should receive HTTP 200 and see `deductionTxHash` / reduced balance in the JSON.
 
 ## 🧪 Testing
 
@@ -186,28 +206,15 @@ You should now receive HTTP 200 with the API data instead of HTTP 402.
    npm start
    ```
 
-2. **Check payment status:**
-   ```bash
-   curl -H "x-wallet-address: 0xYourAddress" \
-     http://localhost:3000/api/payment/status
-   ```
+2. **Inspect auth format:** `curl -s http://localhost:3000/api/auth/spec | jq .`
 
-3. **Make request (will get 402):**
-   ```bash
-   curl -H "x-wallet-address: 0xYourAddress" \
-     http://localhost:3000/api/data
-   ```
+3. **Check payment status:** extend `test-client.js` or use any HTTP client that sends the same four headers as paid routes.
 
-4. **Make payment:**
-   ```bash
-   node examples/make-payment.js
-   ```
+4. **Make request:** `npm run test-client` (402 if underfunded)
 
-5. **Retry request (should work now):**
-   ```bash
-   curl -H "x-wallet-address: 0xYourAddress" \
-     http://localhost:3000/api/data
-   ```
+5. **Make payment:** `node examples/make-payment.js`
+
+6. **Retry:** `npm run test-client` (200 after top-up; each success deducts once)
 
 ### Using Test Scripts
 
@@ -280,15 +287,16 @@ This automatically protects configured routes with payment verification.
 
 ## 🔍 Verification Process
 
-The middleware verifies payments by:
+The middleware:
 
-1. **Extract wallet address** from `x-wallet-address` header
-2. **Query contract** using `hasPaid(address)` function
-3. **Check balance** to determine if sufficient funds
-4. **Return HTTP 402** with payment instructions if not paid
-5. **Allow request** to proceed if payment verified
+1. **Verifies EIP-191 signature** for `x-wallet-address` (`x-auth-*` headers)
+2. **Reads contract state** (`hasPaid`, balance, `pricePerRequest`)
+3. **Returns HTTP 402** if prepaid balance is insufficient
+4. **Calls `deductPayment`** and waits for a successful receipt
+5. **Re-reads balance** to ensure it decreased (guards failed/reverted txs)
+6. **Calls `next()`** only after deduction succeeds — handlers never run on verification alone
 
-All verification happens on-chain - no database required.
+Balances live on-chain; the server does not store credits in a database.
 
 ## 🌐 Network Configuration
 
@@ -306,13 +314,12 @@ Update `CHAIN_ID` and RPC URL in `.env` for mainnet deployment.
 
 ## 🔐 Security Considerations
 
-- ✅ **On-Chain Verification** - Payments verified on blockchain, not database
-- ✅ **Trustless** - No need to trust the server
-- ✅ **Address Validation** - Wallet addresses are validated
-- ✅ **Immutable Records** - Payment history stored on-chain
-- ⚠️ **Rate Limiting** - Consider adding for production
-- ⚠️ **HTTPS** - Always use HTTPS in production
-- ⚠️ **Private Keys** - Never commit private keys to git
+- ✅ **On-chain balances** — Reads and deductions via the contract
+- ✅ **Signatures** — `x-wallet-address` alone is not enough
+- ✅ **Owner key** — Required for `deductPayment`; treat `OWNER_PRIVATE_KEY` as a high-privilege secret
+- ⚠️ **Operator trust** — The API operator controls when deduction runs; this is a prepaid metering model, not anonymous blind trust in the server
+- ⚠️ **Rate limiting / HTTPS** — Recommended for production
+- ⚠️ **Never commit** `.env` or keys to git
 
 ## 🚀 Deployment
 
@@ -350,6 +357,7 @@ npm start
 **Server won't start:**
 - Check Node.js version (needs 18+)
 - Verify `.env` file exists and has correct values
+- If you see `OWNER_PRIVATE_KEY` fatal: set the contract owner key (required for deduction)
 - Check if port 3000 is already in use
 
 **Payment verification fails:**

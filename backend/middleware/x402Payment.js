@@ -1,20 +1,10 @@
 /**
- * x402 Payment Middleware
- * 
- * This middleware implements the x402 payment standard for pay-per-request APIs.
- * 
- * x402 Flow:
- * 1. Client makes API request
- * 2. Server checks if client has paid on-chain
- * 3. If not paid: Respond with HTTP 402 Payment Required + payment instructions
- * 4. Client pays on Rootstock blockchain
- * 5. Client retries request
- * 6. Server verifies payment and serves response
- * 
- * Why HTTP 402?
- * HTTP 402 was reserved in the original HTTP spec for payment-required scenarios
- * but was never standardized. x402 brings this to life for crypto-native payments,
- * enabling programmatic, permissionless API monetization.
+ * Prepaid pay-per-request gate (x402-inspired).
+ *
+ * - HTTP 402 + JSON payment hints (x402-style; not a full spec claim).
+ * - Wallet ownership: EIP-191 signature over a canonical message (custom extension).
+ * - Enforcement: after balance check passes, calls deductPayment on-chain and only
+ *   then invokes next(). Misconfiguration (missing owner key) fails at server startup.
  */
 
 import {
@@ -226,11 +216,12 @@ function generatePaymentInstructions(pricePerRequest) {
             standard: 'x402',
             version: '1.0',
             endpoint: 'PayPerAPI on Rootstock',
+            note: 'This tutorial uses HTTP 402 + payment metadata in an x402-style shape. Wallet ownership uses additional signed headers (not part of the core x402 spec).',
         },
     };
 }
 
-async function deductPaymentOnChain(walletAddress, amount) {
+async function deductPaymentOnChain(walletAddress, amount, balanceBeforeDeduction) {
     if (!walletClient || !ownerAccount) {
         throw new Error('OWNER_PRIVATE_KEY is required to deduct payment per request');
     }
@@ -243,23 +234,32 @@ async function deductPaymentOnChain(walletAddress, amount) {
         account: ownerAccount,
     });
 
-    await publicClient.waitForTransactionReceipt({ hash });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash });
+    if (receipt.status !== 'success') {
+        throw new Error('deductPayment transaction reverted or failed on-chain');
+    }
+
+    const balanceAfter = await publicClient.readContract({
+        address: CONTRACT_ADDRESS,
+        abi: payPerAPIContractABI,
+        functionName: 'getPaymentBalance',
+        args: [walletAddress],
+    });
+    const after = BigInt(balanceAfter);
+    const maxRemainingAfterThisDeduct = balanceBeforeDeduction - amount;
+    // Use inequality so concurrent requests for the same wallet (each deducting once) do not false-fail.
+    if (after > maxRemainingAfterThisDeduct) {
+        throw new Error(
+            `On-chain balance was not reduced after deductPayment (balance ${after.toString()} wei > ${maxRemainingAfterThisDeduct.toString()} wei expected after this deduction).`
+        );
+    }
+
     return hash;
 }
 
 /**
- * x402 Payment Middleware
- * 
- * This middleware:
- * 1. Extracts wallet address from request headers
- * 2. Verifies on-chain payment status
- * 3. Returns HTTP 402 with payment instructions if not paid
- * 4. Allows request to proceed if payment is verified
- * 
- * Usage:
- *   app.get('/api/data', x402PaymentMiddleware, (req, res) => {
- *     res.json({ data: 'Your protected data' });
- *   });
+ * Paid-route gate: signature → balance → deductPayment → next().
+ * See file header for x402-inspired / EIP-191 extension notes.
  */
 export async function x402PaymentMiddleware(req, res, next) {
     // Extract wallet address from request headers
@@ -296,8 +296,8 @@ export async function x402PaymentMiddleware(req, res, next) {
             });
         }
 
-        // Enforce pay-per-request by deducting one request worth of balance.
-        const deductionTxHash = await deductPaymentOnChain(walletAddress, pricePerRequest);
+        // Enforce pay-per-request: deduct on-chain BEFORE handler runs so access cannot be served without consumption.
+        const deductionTxHash = await deductPaymentOnChain(walletAddress, pricePerRequest, balance);
         const remainingBalance = balance - pricePerRequest;
         const remainingRequests = availableRequests > 0 ? availableRequests - 1 : 0;
 
@@ -338,16 +338,40 @@ export async function x402PaymentMiddleware(req, res, next) {
 }
 
 /**
- * Optional: Middleware to deduct payment after serving request
- * This can be used to track usage, but is optional since the contract
- * already tracks balances. You might want to deduct to enforce per-request
- * payment rather than accumulated balance.
- * 
- * Note: This requires the API server to have owner privileges on the contract.
+ * Machine-readable description of wallet ownership (EIP-191 personal_sign).
+ * Used by GET /api/auth/spec for reviewers and integrators.
  */
-export async function deductPaymentAfterRequest(walletAddress, amount) {
-    // This would require a wallet client with owner private key
-    // For now, we'll just log it - implement if needed
-    console.log(`[Optional] Would deduct ${formatRBTC(amount)} RBTC from ${walletAddress}`);
+export function getWalletAuthSpec({ method = 'GET', path = '/api/data', walletAddress = '0x0000000000000000000000000000000000000000' } = {}) {
+    const timestamp = Date.now().toString();
+    const nonce = 'example-nonce-replace-me';
+    const message = buildAuthMessage({
+        walletAddress,
+        method,
+        path,
+        timestamp,
+        nonce,
+    });
+    return {
+        scheme: 'eip191-personal_sign',
+        requiredHeaders: {
+            'x-wallet-address': 'Payer address (must match signing key)',
+            'x-auth-signature': 'Hex signature from viem/ethers signMessage({ message })',
+            'x-auth-timestamp': 'Unix ms when signing; must be within server window',
+            'x-auth-nonce': 'Unique string per request; replay rejected',
+        },
+        messageTemplate: [
+            'x402-auth',
+            'wallet:<lowercase-address>',
+            'method:<HTTP_METHOD>',
+            'path:<exact Express path e.g. /api/data>',
+            'timestamp:<same as x-auth-timestamp>',
+            'nonce:<same as x-auth-nonce>',
+        ].join('\n'),
+        exampleSignableMessage: message,
+        notes: [
+            'Sign the exact multi-line string; server verifies recoverAddress(signature) === x-wallet-address.',
+            'See backend/examples/test-client.js for a working client.',
+        ],
+    };
 }
 

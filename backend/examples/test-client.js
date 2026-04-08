@@ -84,7 +84,10 @@ async function makeInitialRequest() {
       console.log(JSON.stringify(data, null, 2));
       return data;
     } else if (response.status === 200) {
-      console.log('✅ Payment already verified!');
+      console.log('✅ HTTP 200 — signature accepted, prepaid balance OK, deductPayment ran before this response.');
+      if (data.payment?.deductionTxHash) {
+        console.log(`   On-chain deduction tx: ${data.payment.deductionTxHash}`);
+      }
       console.log('Response:', JSON.stringify(data, null, 2));
       return null;
     } else {
@@ -226,7 +229,9 @@ Server URL: ${SERVER_URL}
         console.log('   3. Run this script again');
       }
     } else {
-      console.log('\n✅ Payment already verified - no payment needed!');
+      console.log(
+        '\n✅ First request succeeded with prepaid balance (no HTTP 402 this run). Each successful call still consumes one request via on-chain deductPayment.'
+      );
     }
 
     console.log('\n✅ Test completed!\n');

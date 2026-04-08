@@ -1,28 +1,33 @@
 /**
- * x402 Pay-Per-API Server
- * 
- * A REST API server that implements the x402 payment standard
- * for pay-per-request API access using Rootstock (RBTC).
- * 
- * This server demonstrates:
- * - HTTP 402 Payment Required responses
- * - On-chain payment verification via Rootstock smart contracts
- * - Bitcoin-secured API monetization
- * - Programmatic, permissionless payments
- * 
- * Why Rootstock?
- * Rootstock provides Bitcoin security with EVM compatibility,
- * enabling Bitcoin-backed payments for APIs while using familiar
- * Ethereum tooling (like viem).
+ * Prepaid pay-per-request API (x402-inspired) on Rootstock (RBTC).
+ *
+ * - HTTP 402 + structured payment JSON when prepaid balance is too low.
+ * - EIP-191 signed headers prove control of x-wallet-address.
+ * - deductPayment runs on-chain before route handlers (requires OWNER_PRIVATE_KEY).
  */
 
 import express from 'express';
 import dotenv from 'dotenv';
+import { ownerAccount } from './config/rootstock.js';
 import { paymentMiddleware } from './middleware/x402PaymentConfig.js';
-import { getAuthInstructions, verifyWalletOwnership } from './middleware/x402Payment.js';
+import {
+    getAuthInstructions,
+    verifyWalletOwnership,
+    getWalletAuthSpec,
+} from './middleware/x402Payment.js';
 
 // Load environment variables
 dotenv.config();
+
+if (!ownerAccount) {
+    console.error(`
+FATAL: OWNER_PRIVATE_KEY is not set or invalid.
+
+Pay-per-request is enforced by calling deductPayment on-chain before any protected handler runs.
+Set OWNER_PRIVATE_KEY to the PayPerAPI contract owner key (see backend/.env.example), then restart.
+`);
+    process.exit(1);
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -56,6 +61,32 @@ app.get('/health', (req, res) => {
         message: 'x402 Pay-Per-API Server is running',
         contract: process.env.CONTRACT_ADDRESS,
         network: 'Rootstock Testnet',
+        enforcement: {
+            payPerRequest: 'on-chain deductPayment before protected handlers',
+            walletAuth: 'EIP-191 signature headers required on paid routes and /api/payment/status',
+        },
+        docs: {
+            walletAuthSpec: '/api/auth/spec',
+            exampleClient: 'node examples/test-client.js',
+        },
+    });
+});
+
+/**
+ * Wallet ownership signing spec (for integrators / reviewers).
+ * Demonstrates that access is not granted from x-wallet-address alone.
+ */
+app.get('/api/auth/spec', (req, res) => {
+    const wallet = typeof req.query.wallet === 'string' && req.query.wallet.startsWith('0x')
+        ? req.query.wallet
+        : '0x0000000000000000000000000000000000000000';
+    res.json({
+        title: 'Wallet ownership verification (required with payment)',
+        ...getWalletAuthSpec({
+            method: 'GET',
+            path: '/api/data',
+            walletAddress: wallet,
+        }),
     });
 });
 
@@ -65,17 +96,17 @@ app.get('/health', (req, res) => {
  * Payment is already configured via paymentMiddleware above.
  * The x402 middleware will check payment before this handler runs.
  * 
- * x402 Flow:
- * 1. Client sends request with x-wallet-address header
- * 2. Middleware checks on-chain payment status
- * 3. If not paid: Returns HTTP 402 with payment instructions
- * 4. If paid: This handler runs and returns data
+ * Flow:
+ * 1. Client sends x-wallet-address + signed auth headers (see GET /api/auth/spec)
+ * 2. Middleware verifies signature, then on-chain balance
+ * 3. If not paid: HTTP 402 + payment instructions
+ * 4. If paid: deductPayment on-chain, then this handler runs
  */
 app.get('/api/data', (req, res) => {
     // Payment has been verified by middleware
     // req.paymentInfo contains wallet address and balance info
 
-    const { walletAddress, availableRequests, balance } = req.paymentInfo;
+    const { walletAddress, availableRequests, balance, deductionTxHash } = req.paymentInfo;
 
     // Return the protected data
     res.json({
@@ -92,7 +123,8 @@ app.get('/api/data', (req, res) => {
             walletAddress,
             availableRequests,
             balanceRemaining: balance,
-            message: `You have ${availableRequests} request(s) remaining`,
+            deductionTxHash: deductionTxHash ?? null,
+            message: `You have ${availableRequests} request(s) remaining (one deducted on-chain for this call)`,
         },
     });
 });
@@ -226,13 +258,14 @@ app.listen(PORT, () => {
 
 Endpoints:
   GET  /health              - Health check (no payment)
-  GET  /api/data            - Protected data (requires payment)
-  GET  /api/weather         - Weather API (requires payment)
-  POST /api/ai/infer        - AI inference (requires payment)
-  GET  /api/payment/status  - Check payment status
+  GET  /api/auth/spec       - Wallet signing format (no payment)
+  GET  /api/data            - Protected (signature + prepaid deduct)
+  GET  /api/weather         - Protected (signature + prepaid deduct)
+  POST /api/ai/infer        - Protected (signature + prepaid deduct)
+  GET  /api/payment/status  - Balance check (signature required)
 
-Example request:
-  curl -H "x-wallet-address: 0x..." http://localhost:${PORT}/api/data
+Example client:
+  node examples/test-client.js
 
   `);
 });

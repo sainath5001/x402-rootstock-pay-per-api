@@ -1,13 +1,14 @@
 {
   "name": "x402-rootstock-api",
   "version": "1.0.0",
-  "description": "Pay-per-request API using x402 payment standard on Rootstock",
+  "description": "Pay-per-request API: HTTP 402 + on-chain prepaid RBTC, with x402-style payment metadata and EIP-191 wallet auth",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test-client": "node examples/test-client.js"
+    "test-client": "node examples/test-client.js",
+    "demonstrate-auth": "node examples/demonstrate-auth.js"
   },
   "keywords": [
     "x402",

@@ -1,23 +1,30 @@
 # x402 Pay-Per-API on Rootstock
 
-A complete implementation of pay-per-request APIs using the **x402 payment standard** on **Rootstock (RBTC)**, enabling Bitcoin-secured, permissionless API monetization.
+A **prepaid, pay-per-request** API demo on **Rootstock (RBTC)**. It uses **HTTP 402** and **x402-style JSON** for payment instructions, plus **on-chain balance checks** and **per-request `deductPayment`** so each successful call consumes credit. **Wallet ownership** is proven with **EIP-191 signed headers** (not spoofable via `x-wallet-address` alone).
+
+## Positioning (read before publishing)
+
+- **HTTP 402 + payment metadata**: aligned with the *spirit* of [x402](https://x402.gitbook.io/x402); response shape is x402-style, not a claim of full spec compliance.
+- **Auth**: custom **signature headers** are an **extension** for this tutorial — they are not part of the core x402 spec.
+- **Enforcement**: the server **must** hold `OWNER_PRIVATE_KEY` (contract owner) to call `deductPayment` after verification; without deduction, “pay per request” is not enforced.
 
 ## 🎯 Overview
 
 This project demonstrates how to build a pay-per-request API system where:
-- Clients make API requests
-- Server responds with **HTTP 402 Payment Required** if not paid
-- Clients pay **RBTC** on Rootstock blockchain
-- Server verifies payment on-chain and serves the API response
+- Clients make API requests with **signed auth headers** and `x-wallet-address`
+- Server responds with **HTTP 402 Payment Required** if prepaid balance is insufficient
+- Clients pay **RBTC** into the contract (`pay()`)
+- Server verifies balance **on-chain**, **deducts one request** via `deductPayment`, then serves the response
 
 ### Key Features
 
-- ✅ **x402 Payment Standard** - HTTP 402 Payment Required responses
-- ✅ **Bitcoin-Secured** - Payments secured by Rootstock (Bitcoin merge-mining)
-- ✅ **Trustless** - No databases, no payment processors, pure blockchain verification
-- ✅ **Permissionless** - Any wallet can pay, no accounts or API keys needed
-- ✅ **EVM Compatible** - Uses familiar Ethereum tooling (Solidity, viem)
-- ✅ **Low Fees** - Much cheaper than Bitcoin L1
+- ✅ **HTTP 402** — Payment required responses with structured payment hints (x402-style)
+- ✅ **Bitcoin-secured RBTC** — Rootstock (merge-mined with Bitcoin)
+- ✅ **On-chain verification** — No DB for balances; reads come from the contract
+- ✅ **Per-request deduction** — `deductPayment` runs before the route handler (not optional)
+- ✅ **Wallet ownership** — EIP-191 `personal_sign` over a canonical message (see `GET /api/auth/spec`)
+- ✅ **EVM compatible** — Solidity + viem + Foundry
+- ✅ **Low fees** — Suitable for small RBTC amounts per request
 
 ## 📁 Project Structure
 
@@ -70,30 +77,35 @@ See [backend/README.md](./backend/README.md) for detailed setup.
 
 ### Step 3: Test the Flow
 
-```bash
-# Make request (will get HTTP 402)
-curl -H "x-wallet-address: 0xYourAddress" \
-  http://localhost:3000/api/data
+Protected routes require **signed headers**. Use the example client (or `GET /api/auth/spec` for the exact format).
 
-# Make payment (using example script)
+```bash
+cd backend
+# See signing format (server must be running)
+curl -s http://localhost:3000/api/auth/spec | head
+
+# Pay into contract (payer key)
 node examples/make-payment.js
 
-# Retry request (should get data)
-curl -H "x-wallet-address: 0xYourAddress" \
-  http://localhost:3000/api/data
+# Call API with signatures (see .env: SIGNER_PRIVATE_KEY, WALLET_ADDRESS)
+npm run test-client
+
+# Optional: print a signed message locally for reviewers
+npm run demonstrate-auth
 ```
 
 ## 🔄 Complete Payment Flow
 
 ```mermaid
 flowchart TD
-    A[Client makes API request] --> B{Server checks<br/>payment status}
-    B -->|Not Paid| C[Return HTTP 402<br/>+ x402 instructions]
-    C --> D[Client pays RBTC<br/>to contract]
-    D --> E[Contract records<br/>payment on-chain]
-    E --> F[Client retries<br/>API request]
-    F --> B
-    B -->|Paid| G[Return HTTP 200<br/>+ API data]
+    A[Client signed request] --> B{Verify EIP-191 signature}
+    B -->|Invalid| Z[HTTP 401]
+    B -->|OK| C{Prepaid balance on-chain?}
+    C -->|No| D[HTTP 402 + payment JSON]
+    D --> E[Client pay to contract]
+    E --> A
+    C -->|Yes| F[deductPayment on-chain]
+    F --> G[HTTP 200 + API data]
     
     style C fill:#ff9999
     style G fill:#99ff99
@@ -147,27 +159,27 @@ classDiagram
 
 **Endpoints:**
 - `GET /health` - Health check (no payment)
-- `GET /api/data` - Protected data (requires payment)
-- `GET /api/weather` - Weather API (requires payment)
-- `POST /api/ai/infer` - AI inference (requires payment)
-- `GET /api/payment/status` - Check payment status
+- `GET /api/auth/spec` - Wallet signing format (no payment)
+- `GET /api/data` - Protected (signature + prepaid deduct)
+- `GET /api/weather` - Protected (signature + prepaid deduct)
+- `POST /api/ai/infer` - Protected (signature + prepaid deduct)
+- `GET /api/payment/status` - Balance check (signature required)
 
 ### 3. Payment Middleware (`backend/middleware/x402Payment.js`)
 
 **Flow:**
-1. Extract wallet address from request header
-2. Query smart contract for payment status
-3. Return HTTP 402 with x402 instructions if not paid
-4. Allow request to proceed if paid
+1. Read `x-wallet-address` and verify EIP-191 signature (`x-auth-*` headers)
+2. Read prepaid balance from the contract; if insufficient, return HTTP 402 (x402-style JSON)
+3. If sufficient, submit `deductPayment(payer, pricePerRequest)`, wait for receipt, confirm balance decreased
+4. Call `next()` so the route handler runs only after deduction succeeds
 
 ## 🔐 Security Considerations
 
-- ✅ **Trustless Verification** - Payments verified on-chain, not in database
-- ✅ **No API Keys** - Wallet address is the identity
-- ✅ **Immutable Records** - Payment history stored on blockchain
-- ✅ **No Centralized Control** - Contract is decentralized
-- ⚠️ **Rate Limiting** - Consider adding for production
-- ⚠️ **HTTPS Required** - Always use HTTPS in production
+- ✅ **On-chain balances** — Reads and deductions go through the contract
+- ✅ **Wallet ownership** — Requests must carry a valid signature for `x-wallet-address`
+- ✅ **Per-request deduction** — Owner key on server (`OWNER_PRIVATE_KEY`) required; protect it like production secrets
+- ⚠️ **Not “trustless” toward the API operator** — The server controls deduction timing and holds the owner key; clients still verify payments on-chain
+- ⚠️ **Rate limiting / HTTPS** — Use in production
 
 ## 🧪 Testing
 
@@ -180,20 +192,17 @@ forge test
 ### Backend Tests
 ```bash
 cd backend
-# Start server
 npm start
 
 # In another terminal
-curl -H "x-wallet-address: 0xYourAddress" \
-  http://localhost:3000/api/data
+npm run test-client
 ```
 
 ### Full Flow Test
 ```bash
 cd backend
 node examples/make-payment.js
-curl -H "x-wallet-address: 0xYourAddress" \
-  http://localhost:3000/api/data
+npm run test-client
 ```
 
 ## 📚 Documentation
